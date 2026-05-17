@@ -1,0 +1,7 @@
+/build_pyrkon
+/build_normal
+/.vscode
+*.3dsx
+*.cia
+*.elf
+*.smdh
