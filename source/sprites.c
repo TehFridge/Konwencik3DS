@@ -31,10 +31,10 @@ void spritesInit() {
         fridge_image = GFX_LoadTexture("romfs:/gfx/tehfridge.t3x", 0);
     }
     #ifndef PYRKON
-        logo3ds = GFX_LoadTexture("romfs:/gfx/logo.t3x", 0);
-    #endif
-    
-    #ifdef PYRKON
         logo3ds = GFX_LoadTexture("romfs:/gfx/logo.t3x", 1);
+    #endif
+
+    #ifdef PYRKON
+        logo3ds = GFX_LoadTexture("romfs:/gfx/logo.t3x", 0);
     #endif
 }
