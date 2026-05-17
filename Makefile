@@ -40,8 +40,6 @@ GFXBUILD	:=	$(ROMFS)/gfx
 #---------------------------------------------------------------------------------
 APP_VER				:= 1024
 APP_AUTHOR			:= TehFridge
-PRODUCT_CODE		:= KONWDS
-UNIQUE_ID			:= 0x55126
 RSF_PATH			:= meta/inpost.rsf
 
 #---------------------------------------------------------------------------------
@@ -68,6 +66,8 @@ ifdef PYRKON
 	APP_DESCRIPTION		:= PyrKonwencik na Nintendo 3DS
 	BANNER_AUDIO		:= pyrmeta/banner.wav
 	BANNER_IMAGE		:= pyrmeta/banner.png
+	PRODUCT_CODE		:= KONWDS
+	UNIQUE_ID			:= 0x55126
 	ICON				:= pyrmeta/icon.png
 else
 	TARGET				:= Konwencik3DS
@@ -76,6 +76,8 @@ else
 	APP_DESCRIPTION		:= Konwencik na Nintendo 3DS
 	BANNER_AUDIO		:= meta/banner.wav
 	BANNER_IMAGE		:= meta/banner.png
+	PRODUCT_CODE		:= PYR3DS
+	UNIQUE_ID			:= 0x34392
 	ICON				:= meta/icon.png
 endif
 # Check if DEBUG is set in the environment or command line
