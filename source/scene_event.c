@@ -374,7 +374,7 @@ void sceneEventUpdate(uint32_t kDown, uint32_t kHeld) {
             getKonwencik_EventProgram(global_selected_event->id); 
             playCwav(2, true);
         } 
-        else if (current_tab == TAB_MAP) {
+        else if (current_tab == TAB_MAP && osGetWifiStrength() > 0) {
             if (map_is_downloading || map_is_processing) return;
 
             Mapka* sel_map = &global_selected_event->venue_maps[selected_map_idx];
