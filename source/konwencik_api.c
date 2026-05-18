@@ -16,10 +16,289 @@
 #include "utils.h"
 #include "cJSON.h"
 
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_ONLY_PNG
-#define STBI_ONLY_JPEG
-#include "stb_image.h"
+#include <png.h>
+#include <jpeglib.h>
+#include <setjmp.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <webp/decode.h>
+
+typedef enum {
+    FMT_NONE,
+    FMT_PNG,
+    FMT_JPEG,
+    FMT_WEBP
+} ImgFmt;
+
+typedef struct {
+    const uint8_t* data;
+    size_t size;
+    size_t offset;
+} mem_source;
+
+struct my_jpeg_error_mgr {
+    struct jpeg_error_mgr pub;
+    jmp_buf setjmp_buffer;
+};
+
+
+typedef struct ImageStream {
+    mem_source mem;
+
+    int width, height;
+    int format;
+
+    
+    int stride;
+    int bpp;
+
+    
+    png_structp png;
+    png_infop info;
+
+    
+    struct jpeg_decompress_struct cinfo;
+    struct my_jpeg_error_mgr jerr;
+    uint8_t* jpeg_row_buf; 
+    
+    WebPDecoderConfig webp_cfg;
+    uint8_t* webp_rgba;
+    int webp_row;
+} ImageStream;
+
+
+static void png_mem_read_cb(png_structp png_ptr, png_bytep data, png_size_t length)
+{
+    mem_source* src = (mem_source*)png_get_io_ptr(png_ptr);
+
+    if (src->offset + length > src->size)
+        png_error(png_ptr, "Unexpected end of PNG data");
+
+    memcpy(data, src->data + src->offset, length);
+    src->offset += length;
+}
+
+static void my_jpeg_error_exit(j_common_ptr cinfo)
+{
+    struct my_jpeg_error_mgr* myerr =
+        (struct my_jpeg_error_mgr*)cinfo->err;
+
+    longjmp(myerr->setjmp_buffer, 1);
+}
+
+static void ImageStream_Close(ImageStream* ctx)
+{
+    if (ctx->format == FMT_PNG)
+    {
+        png_destroy_read_struct(&ctx->png, &ctx->info, NULL);
+    }
+    else if (ctx->format == FMT_JPEG)
+    {
+        jpeg_destroy_decompress(&ctx->cinfo);
+    }
+    else if (ctx->format == FMT_WEBP)
+    {
+        if (ctx->webp_rgba)
+            free(ctx->webp_rgba);
+
+        WebPFreeDecBuffer(&ctx->webp_cfg.output);
+    }
+
+    memset(ctx, 0, sizeof(ImageStream));
+}
+
+static bool ImageStream_Open(ImageStream* ctx, const uint8_t* data, size_t size)
+{
+    memset(ctx, 0, sizeof(ImageStream));
+
+    ctx->mem.data = data;
+    ctx->mem.size = size;
+    ctx->mem.offset = 0;
+
+    ctx->bpp = 4; 
+    ctx->stride = 0;
+
+    
+    
+    
+    if (size >= 4 && !memcmp(data, "\x89PNG", 4))
+    {
+        ctx->format = FMT_PNG;
+
+        ctx->png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+        ctx->info = png_create_info_struct(ctx->png);
+
+        if (setjmp(png_jmpbuf(ctx->png))) {
+            ImageStream_Close(ctx); 
+            return false;
+        }
+
+        png_set_read_fn(ctx->png, &ctx->mem, png_mem_read_cb);
+        png_read_info(ctx->png, ctx->info);
+
+        int color_type = png_get_color_type(ctx->png, ctx->info);
+        int bit_depth  = png_get_bit_depth(ctx->png, ctx->info);
+
+        if (bit_depth == 16)
+            png_set_strip_16(ctx->png);
+
+        if (color_type == PNG_COLOR_TYPE_PALETTE)
+            png_set_palette_to_rgb(ctx->png);
+
+        if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8)
+            png_set_expand_gray_1_2_4_to_8(ctx->png);
+
+        
+        png_set_gray_to_rgb(ctx->png);
+        png_set_add_alpha(ctx->png, 0xFF, PNG_FILLER_AFTER);
+
+        png_read_update_info(ctx->png, ctx->info);
+
+        ctx->width  = png_get_image_width(ctx->png, ctx->info);
+        ctx->height = png_get_image_height(ctx->png, ctx->info);
+        ctx->stride = ctx->width * 4;
+
+        return true;
+    }
+
+    
+    
+    
+    if (size >= 2 && data[0] == 0xFF && data[1] == 0xD8)
+    {
+        ctx->format = FMT_JPEG;
+        ctx->cinfo.err = jpeg_std_error(&ctx->jerr.pub);
+        ctx->jerr.pub.error_exit = my_jpeg_error_exit;
+
+        
+        jpeg_create_decompress(&ctx->cinfo);
+
+        if (setjmp(ctx->jerr.setjmp_buffer)) {
+            ImageStream_Close(ctx); 
+            return false;
+        }
+
+        jpeg_mem_src(&ctx->cinfo, data, size);
+        jpeg_read_header(&ctx->cinfo, TRUE);
+        ctx->cinfo.out_color_space = JCS_RGB;
+        jpeg_start_decompress(&ctx->cinfo);
+
+        ctx->width  = ctx->cinfo.output_width;
+        ctx->height = ctx->cinfo.output_height;
+        ctx->stride = ctx->width * 4;
+
+        
+        ctx->jpeg_row_buf = (uint8_t*)malloc(ctx->width * 3);
+        if (!ctx->jpeg_row_buf) {
+            ImageStream_Close(ctx);
+            return false;
+        }
+
+        return true;
+    }
+    
+    
+    
+    if (size >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "WEBP", 4))
+    {
+        ctx->format = FMT_WEBP;
+        WebPDecoderConfig* cfg = &ctx->webp_cfg;
+
+        if (!WebPInitDecoderConfig(cfg)) return false;
+
+        if (WebPGetFeatures(data, size, &cfg->input) != VP8_STATUS_OK) return false;
+
+        ctx->width  = cfg->input.width;
+        ctx->height = cfg->input.height;
+        ctx->stride = ctx->width * 4;
+
+        size_t buffer_size = ctx->width * ctx->height * 4;
+        ctx->webp_rgba = (uint8_t*)malloc(buffer_size);
+        if (!ctx->webp_rgba) {
+            ImageStream_Close(ctx); 
+            return false;
+        }
+
+        cfg->output.colorspace = MODE_RGBA;
+        cfg->output.u.RGBA.rgba   = ctx->webp_rgba;
+        cfg->output.u.RGBA.stride = ctx->stride;
+        cfg->output.u.RGBA.size   = buffer_size;
+        cfg->output.is_external_memory = 1;
+
+        if (WebPDecode(data, size, cfg) != VP8_STATUS_OK) {
+            ImageStream_Close(ctx); 
+            return false;
+        }
+
+        ctx->webp_row = 0;
+        return true;
+    }
+    return false;
+}
+
+static bool ImageStream_ReadRows(ImageStream* ctx, uint8_t* buffer, int num_rows)
+{
+    if (ctx->format == FMT_PNG)
+    {
+        if (setjmp(png_jmpbuf(ctx->png)))
+            return false;
+
+        for (int i = 0; i < num_rows; i++)
+        {
+            png_bytep row = buffer + (i * ctx->stride);
+            png_read_row(ctx->png, row, NULL);
+        }
+
+        return true;
+    }
+
+    if (ctx->format == FMT_JPEG)
+    {
+        if (setjmp(ctx->jerr.setjmp_buffer))
+            return false;
+
+        for (int i = 0; i < num_rows; i++)
+        {
+            uint8_t* row = buffer + (i * ctx->stride);
+
+            
+            JSAMPROW ptr = ctx->jpeg_row_buf;
+            jpeg_read_scanlines(&ctx->cinfo, &ptr, 1);
+
+            for (int x = 0; x < ctx->width; x++)
+            {
+                row[x * 4 + 0] = ctx->jpeg_row_buf[x * 3 + 0];
+                row[x * 4 + 1] = ctx->jpeg_row_buf[x * 3 + 1];
+                row[x * 4 + 2] = ctx->jpeg_row_buf[x * 3 + 2];
+                row[x * 4 + 3] = 0xFF;
+            }
+        }
+        return true;
+    }
+
+    if (ctx->format == FMT_WEBP)
+    {
+        for (int i = 0; i < num_rows; i++)
+        {
+            if (ctx->webp_row >= ctx->height)
+                return false;
+
+            memcpy(
+                buffer + (i * ctx->stride),
+                ctx->webp_rgba + (ctx->webp_row * ctx->stride),
+                ctx->stride
+            );
+
+            ctx->webp_row++;
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
 
 int program_count;
 ResponseBuffer konwencik_baza = {NULL, 0, 0, false};
@@ -476,37 +755,62 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
         Konwencik_FreeMapData(map);
     }
 
-    int w, h, channels;
-    uint8_t* decoded_image = stbi_load_from_memory(image_data, size, &w, &h, &channels, 3);
-    if (!decoded_image) {
-        log_to_file("stb failed: %s\n", stbi_failure_reason());
+    ImageStream stream;
+    if (!ImageStream_Open(&stream, image_data, size)) {
+        log_to_file("Unsupported image format or corrupt header!\n");
         return;
     }
 
-    log_to_file("Decoded image dimensions: %dx%d, channels: %d\n", w, h, channels);
+    int w = stream.width;
+    int h = stream.height;
+    log_to_file("Decoded image dimensions: %dx%d\n", w, h);
+
     const int CHUNK_MAX = 128; 
-    
     int chunks_x = (w + CHUNK_MAX - 1) / CHUNK_MAX;
     int chunks_y = (h + CHUNK_MAX - 1) / CHUNK_MAX;
-    log_to_file("mallocing size: %zu bytes for %d chunks (%d x %d)\n", sizeof(MapChunk) * chunks_x * chunks_y, chunks_x * chunks_y, chunks_x, chunks_y);
-    map->runtime_data.chunks = malloc(sizeof(MapChunk) * chunks_x * chunks_y);
+    
+    log_to_file("Allocating chunks array...\n");
+
+    map->runtime_data.chunks = calloc(chunks_x * chunks_y, sizeof(MapChunk));
+    if (!map->runtime_data.chunks) {
+        log_to_file("Failed to allocate memory for map chunks!\n");
+        ImageStream_Close(&stream);
+        return;
+    }
+
     map->runtime_data.num_chunks_x = chunks_x;
     map->runtime_data.num_chunks_y = chunks_y;
     map->runtime_data.total_width = w;
     map->runtime_data.total_height = h;
 
+    uint8_t* strip_buffer = malloc(w * CHUNK_MAX * 4);
+    if (!strip_buffer) {
+        log_to_file("Failed to allocate memory for strip buffer!\n");
+        free(map->runtime_data.chunks); 
+        map->runtime_data.chunks = NULL;
+        ImageStream_Close(&stream);
+        return;
+    }
+
     int current_chunk = 0;
+    bool allocation_failed = false;
 
     for (int cy = 0; cy < chunks_y; cy++) {
         log_to_file("Processing chunk row %d/%d...\n", cy + 1, chunks_y);
+        
+        int rows_to_read = (cy == chunks_y - 1 && h % CHUNK_MAX != 0) ? (h % CHUNK_MAX) : CHUNK_MAX;
+        
+        if (!ImageStream_ReadRows(&stream, strip_buffer, rows_to_read)) {
+            log_to_file("Failed to read image rows!\n");
+            break; 
+        }
+
         for (int cx = 0; cx < chunks_x; cx++) {
-            log_to_file("Processing chunk (%d, %d)...\n", cx + 1, cy + 1);
             int chunk_w = (cx == chunks_x - 1 && w % CHUNK_MAX != 0) ? (w % CHUNK_MAX) : CHUNK_MAX;
-            int chunk_h = (cy == chunks_y - 1 && h % CHUNK_MAX != 0) ? (h % CHUNK_MAX) : CHUNK_MAX;
+            int chunk_h = rows_to_read; 
 
             int tex_w = next_pow2(chunk_w);
             int tex_h = next_pow2(chunk_h);
-
             if (tex_w < 8) tex_w = 8;
             if (tex_h < 8) tex_h = 8;
 
@@ -516,9 +820,17 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
             chunk->x_offset = cx * CHUNK_MAX;
             chunk->y_offset = cy * CHUNK_MAX;
 
-            if (!C3D_TexInit(&chunk->tex, tex_w, tex_h, GPU_RGB565)) {
-                log_to_file("Failed to initialize texture. Out of Memory!\n");
+            
+            if (allocation_failed) {
                 chunk->tex.data = NULL;
+                current_chunk++;
+                continue;
+            }
+
+            if (!C3D_TexInit(&chunk->tex, tex_w, tex_h, GPU_RGB565)) {
+                log_to_file("Failed to init texture %d. Out of VRAM/Linear Heap!\n", current_chunk);
+                chunk->tex.data = NULL; 
+                allocation_failed = true; 
                 current_chunk++;
                 continue; 
             }
@@ -527,29 +839,22 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
             C3D_TexSetWrap(&chunk->tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 
             u16* dest = (u16*)chunk->tex.data;
-            u8* src = decoded_image;
 
             for (int y = 0; y < tex_h; y++) {
                 for (int x = 0; x < tex_w; x++) {
-
                     u32 morton_idx = get_morton_offset(x, y, tex_w);
 
                     if (x < chunk_w && y < chunk_h) {
-
                         int src_x = chunk->x_offset + x;
-                        int src_y = chunk->y_offset + y;
+                        int src_y = y;
 
-                        int src_idx = (src_y * w + src_x) * 3;
+                        int src_idx = (src_y * w + src_x) * 4;
 
-                        u8 r = src[src_idx + 0];
-                        u8 g = src[src_idx + 1];
-                        u8 b = src[src_idx + 2];
+                        u8 r = strip_buffer[src_idx + 0];
+                        u8 g = strip_buffer[src_idx + 1];
+                        u8 b = strip_buffer[src_idx + 2];
 
-                        dest[morton_idx] =
-                            ((r & 0xF8) << 8) |
-                            ((g & 0xFC) << 3) |
-                            (b >> 3);
-
+                        dest[morton_idx] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
                     } else {
                         dest[morton_idx] = 0;
                     }
@@ -560,30 +865,40 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
             chunk->subtex.height = chunk_h;
             chunk->subtex.left = 0.0f;
             chunk->subtex.right = (float)chunk_w / (float)tex_w;
-
             chunk->subtex.top = (float)chunk_h / (float)tex_h;
             chunk->subtex.bottom = 0.0f;
 
             current_chunk++;
         }
-        log_to_file("Finished processing chunk row %d/%d.\n", cy + 1, chunks_y);
     }
+    
     log_to_file("Finished processing all chunks. Total chunks: %d\n", current_chunk);
-    stbi_image_free(decoded_image);
+    
+    free(strip_buffer);
+    ImageStream_Close(&stream);
     map->runtime_data.loaded = true;
 }
 
 void Konwencik_FreeMapData(Mapka* map) {
-    if (map && map->runtime_data.loaded) {
-        log_to_file("Freeing map data textures...\n");
-        int total = map->runtime_data.num_chunks_x * map->runtime_data.num_chunks_y;
-        for (int i = 0; i < total; i++) {
-            if (map->runtime_data.chunks[i].tex.data != NULL) {
-                C3D_TexDelete(&map->runtime_data.chunks[i].tex);
-            }
+    if (!map || !map->runtime_data.loaded || !map->runtime_data.chunks)
+        return;
+
+    log_to_file("Freeing map data textures...\n");
+
+    int total = map->runtime_data.num_chunks_x * map->runtime_data.num_chunks_y;
+
+    for (int i = 0; i < total; i++) {
+        C3D_Tex* tex = &map->runtime_data.chunks[i].tex;
+
+        
+        
+        if (tex && tex->data != NULL) {
+            C3D_TexDelete(tex);
+            memset(tex, 0, sizeof(C3D_Tex));
         }
-        free(map->runtime_data.chunks);
-        map->runtime_data.chunks = NULL;
-        map->runtime_data.loaded = false;
     }
+
+    free(map->runtime_data.chunks);
+    map->runtime_data.chunks = NULL;
+    map->runtime_data.loaded = false;
 }

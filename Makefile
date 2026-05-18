@@ -38,7 +38,7 @@ GRAPHICS	:=	gfx
 ROMFS		:=	romfs
 GFXBUILD	:=	$(ROMFS)/gfx
 #---------------------------------------------------------------------------------
-APP_VER				:= 1024
+APP_VER				:= 1025
 APP_AUTHOR			:= TehFridge
 RSF_PATH			:= meta/inpost.rsf
 
@@ -103,14 +103,21 @@ ASFLAGS	:=	-g $(ARCH)
 LDFLAGS = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
 
-LIBS	:= `curl-config --libs` -lcitro2d -lcitro3d -lctru -lm `$(PREFIX)pkg-config vorbisidec --libs` -lcwav -lncsnd -ljansson -lmbedtls -lmbedcrypto -ljpeg
-
+LIBS := \
+`curl-config --libs` \
+-lcitro2d -lcitro3d -lctru \
+-lpng -ljpeg -lm -lz \
+-lcwav -lncsnd \
+-ljansson \
+-lmbedtls -lmbedcrypto \
+-lwebpdecoder -lwebpdemux -lwebp -lsharpyuv \
+`$(PREFIX)pkg-config vorbisidec --libs`
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS := $(PORTLIBS) $(CTRULIB) $(DEVKITPRO)/libcwav $(DEVKITPRO)/libncsnd
+LIBDIRS := $(PORTLIBS) $(CTRULIB) $(DEVKITPRO)/libcwav $(DEVKITPRO)/libncsnd $(CURDIR)/libs
 
 #---------------------------------------------------------------------------------
 # no real need to edit anything past this point unless you need to add additional
@@ -179,7 +186,7 @@ export INCLUDE	:=	$(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 			$(foreach dir,$(LIBDIRS),-I$(dir)/include) \
 			-I$(CURDIR)/$(BUILD)
 
-export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export LIBPATHS := -L$(CURDIR)/libs $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
 
 export _3DSXDEPS	:=	$(if $(NO_SMDH),,$(OUTPUT).smdh)
 
