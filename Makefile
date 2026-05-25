@@ -38,7 +38,7 @@ GRAPHICS	:=	gfx
 ROMFS		:=	romfs
 GFXBUILD	:=	$(ROMFS)/gfx
 #---------------------------------------------------------------------------------
-APP_VER				:= 1025
+APP_VER				:= 1026
 APP_AUTHOR			:= TehFridge
 RSF_PATH			:= meta/inpost.rsf
 
