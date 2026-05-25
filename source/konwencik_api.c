@@ -761,13 +761,27 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
         return;
     }
 
-    int w = stream.width;
-    int h = stream.height;
-    log_to_file("Decoded image dimensions: %dx%d\n", w, h);
+    int orig_w = stream.width;
+    int orig_h = stream.height;
+    log_to_file("Decoded image dimensions: %dx%d\n", orig_w, orig_h);
+
+    
+    int new_w = orig_w;
+    int new_h = orig_h;
+    if (orig_w > 2048 || orig_h > 2048) {
+        if (orig_w > orig_h) {
+            new_w = 2048;
+            new_h = (orig_h * 2048) / orig_w;
+        } else {
+            new_h = 2048;
+            new_w = (orig_w * 2048) / orig_h;
+        }
+        log_to_file("Resizing image to max 2048x2048: %dx%d\n", new_w, new_h);
+    }
 
     const int CHUNK_MAX = 128; 
-    int chunks_x = (w + CHUNK_MAX - 1) / CHUNK_MAX;
-    int chunks_y = (h + CHUNK_MAX - 1) / CHUNK_MAX;
+    int chunks_x = (new_w + CHUNK_MAX - 1) / CHUNK_MAX;
+    int chunks_y = (new_h + CHUNK_MAX - 1) / CHUNK_MAX;
     
     log_to_file("Allocating chunks array...\n");
 
@@ -780,10 +794,13 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
 
     map->runtime_data.num_chunks_x = chunks_x;
     map->runtime_data.num_chunks_y = chunks_y;
-    map->runtime_data.total_width = w;
-    map->runtime_data.total_height = h;
+    map->runtime_data.total_width = new_w;
+    map->runtime_data.total_height = new_h;
 
-    uint8_t* strip_buffer = malloc(w * CHUNK_MAX * 4);
+    
+    uint8_t* strip_buffer = malloc(new_w * CHUNK_MAX * 4);
+    uint8_t* temp_orig_row = NULL;
+    
     if (!strip_buffer) {
         log_to_file("Failed to allocate memory for strip buffer!\n");
         free(map->runtime_data.chunks); 
@@ -792,21 +809,68 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
         return;
     }
 
+    
+    if (new_w != orig_w || new_h != orig_h) {
+        temp_orig_row = malloc(orig_w * 4);
+        if (!temp_orig_row) {
+            log_to_file("Failed to allocate memory for temp row buffer!\n");
+            free(strip_buffer);
+            free(map->runtime_data.chunks);
+            map->runtime_data.chunks = NULL;
+            ImageStream_Close(&stream);
+            return;
+        }
+    }
+
     int current_chunk = 0;
     bool allocation_failed = false;
+    int current_orig_row = 0;
+    bool read_failed = false;
 
     for (int cy = 0; cy < chunks_y; cy++) {
         log_to_file("Processing chunk row %d/%d...\n", cy + 1, chunks_y);
         
-        int rows_to_read = (cy == chunks_y - 1 && h % CHUNK_MAX != 0) ? (h % CHUNK_MAX) : CHUNK_MAX;
+        int rows_to_read = (cy == chunks_y - 1 && new_h % CHUNK_MAX != 0) ? (new_h % CHUNK_MAX) : CHUNK_MAX;
         
-        if (!ImageStream_ReadRows(&stream, strip_buffer, rows_to_read)) {
-            log_to_file("Failed to read image rows!\n");
-            break; 
+        if (new_w == orig_w && new_h == orig_h) {
+            
+            if (!ImageStream_ReadRows(&stream, strip_buffer, rows_to_read)) {
+                log_to_file("Failed to read image rows!\n");
+                break; 
+            }
+        } else {
+            
+            for (int r = 0; r < rows_to_read; r++) {
+                int target_ny = cy * CHUNK_MAX + r;
+                int target_oy = target_ny * orig_h / new_h; 
+                
+                
+                while (current_orig_row <= target_oy) {
+                    if (!ImageStream_ReadRows(&stream, temp_orig_row, 1)) {
+                        log_to_file("Failed to read image row for resize!\n");
+                        read_failed = true;
+                        break;
+                    }
+                    current_orig_row++;
+                }
+                if (read_failed) break;
+                
+                
+                uint8_t* dest_row = strip_buffer + r * (new_w * 4);
+                for (int nx = 0; nx < new_w; nx++) {
+                    int ox = nx * orig_w / new_w; 
+                    dest_row[nx * 4 + 0] = temp_orig_row[ox * 4 + 0];
+                    dest_row[nx * 4 + 1] = temp_orig_row[ox * 4 + 1];
+                    dest_row[nx * 4 + 2] = temp_orig_row[ox * 4 + 2];
+                    dest_row[nx * 4 + 3] = temp_orig_row[ox * 4 + 3];
+                }
+            }
+            if (read_failed) break;
         }
 
+        
         for (int cx = 0; cx < chunks_x; cx++) {
-            int chunk_w = (cx == chunks_x - 1 && w % CHUNK_MAX != 0) ? (w % CHUNK_MAX) : CHUNK_MAX;
+            int chunk_w = (cx == chunks_x - 1 && new_w % CHUNK_MAX != 0) ? (new_w % CHUNK_MAX) : CHUNK_MAX;
             int chunk_h = rows_to_read; 
 
             int tex_w = next_pow2(chunk_w);
@@ -820,7 +884,6 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
             chunk->x_offset = cx * CHUNK_MAX;
             chunk->y_offset = cy * CHUNK_MAX;
 
-            
             if (allocation_failed) {
                 chunk->tex.data = NULL;
                 current_chunk++;
@@ -848,7 +911,7 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
                         int src_x = chunk->x_offset + x;
                         int src_y = y;
 
-                        int src_idx = (src_y * w + src_x) * 4;
+                        int src_idx = (src_y * new_w + src_x) * 4;
 
                         u8 r = strip_buffer[src_idx + 0];
                         u8 g = strip_buffer[src_idx + 1];
@@ -874,6 +937,7 @@ void Konwencik_ProcessMapData(Mapka* map, const uint8_t* image_data, size_t size
     
     log_to_file("Finished processing all chunks. Total chunks: %d\n", current_chunk);
     
+    if (temp_orig_row) free(temp_orig_row);
     free(strip_buffer);
     ImageStream_Close(&stream);
     map->runtime_data.loaded = true;

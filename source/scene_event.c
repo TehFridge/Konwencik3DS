@@ -355,12 +355,21 @@ void sceneEventUpdate(uint32_t kDown, uint32_t kHeld) {
     
     
     if (current_tab == TAB_MAP) {
+        float old_zoom = map_zoom;
         if (kHeld & KEY_A) map_zoom += 1.5f * dt;
         if (kHeld & KEY_Y) map_zoom -= 1.5f * dt;
         if (map_zoom < 0.25f) map_zoom = 0.25f;
         if (map_zoom > 4.0f) map_zoom = 4.0f;
-    }
 
+        if (old_zoom != map_zoom) {
+            // Map viewport runs from X=0 to 400 and Y=30 to 240. Center is approx (200, 105 relative to map draw_y zero)
+            float center_map_x = (map_cam_x + 200.0f) / old_zoom;
+            float center_map_y = (map_cam_y + 105.0f) / old_zoom;
+            
+            map_cam_x = (center_map_x * map_zoom) - 200.0f;
+            map_cam_y = (center_map_y * map_zoom) - 105.0f;
+        }
+    }
     if (kDown & KEY_START) {
         if (current_tab == TAB_PROGRAM && osGetWifiStrength() > 0) {
             
